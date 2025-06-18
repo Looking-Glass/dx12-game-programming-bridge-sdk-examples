@@ -129,15 +129,15 @@ namespace DX12GameProgramming
 
         private void InitializeBridge(string name)
         {
-            //if (!BridgeSDK.Controller.Initialize(name))
-            //{
-            //    throw new Exception("Failed to initialize bridge");
-            //}
-
-            if (!BridgeSDK.Controller.InitializeWithPath(name, "C:\\Repos\\LookingGlassBridge\\out\\build\\x64-Debug"))
+            if (!BridgeSDK.Controller.Initialize(name))
             {
                 throw new Exception("Failed to initialize bridge");
             }
+
+            //if (!BridgeSDK.Controller.InitializeWithPath(name, "C:\\Repos\\LookingGlassBridge\\out\\build\\x64-Debug"))
+            //{
+            //    throw new Exception("Failed to initialize bridge");
+            //}
 
             // mlc: instance the window
             bool window_status = BridgeSDK.Controller.InstanceWindowDX(Device.NativePointer, ref _bridge_window);

@@ -200,7 +200,7 @@ namespace BridgeSDK
 
     public partial class Controller
     {
-        public const string BridgeVersion = "2.6.0";
+        public const string BridgeVersion = "2.6.1";
 
         public static void PopulateWindowValues(BridgeWindowData bridgeData, Window wnd)
         {

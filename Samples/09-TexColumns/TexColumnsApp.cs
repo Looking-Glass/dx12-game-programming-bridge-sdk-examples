@@ -320,7 +320,7 @@ namespace DX12GameProgramming
             Texture tex = new Texture
             {
                 Name = name,
-                Filename = "C:\\Users\\zinsl\\Downloads\\38060_rgbd.jpg"
+                Filename = "C:\\Users\\alec\\Downloads\\188445_rgbd.jpg"
             };
             tex.Resource = TextureUtilities.CreateTextureFromBitmap(Device, CommandList, tex.Filename);
             _textures[tex.Name] = tex;

@@ -39,7 +39,6 @@ namespace DX12GameProgramming
         private InputLayoutDescription _inputLayout;
         private PipelineState _pso;
 
-        private IntPtr _bridgeWindow;   // supplied elsewhere by your framework
 
         public BoxApp() => MainWindowCaption = "Textured Quad";
 
@@ -135,7 +134,7 @@ float4 main(PSIn i):SV_TARGET{ return tex0.Sample(samp,i.Tex); }";
         private void LoadTextureAndCreateSRV()
         {
             _texture = TextureUtilities.CreateTextureFromBitmap(
-                Device, CommandList, @"C:\Users\zinsl\Downloads\38060_rgbd.jpg");
+                Device, CommandList, @"./assets/188445_rgbd.jpg");
 
             var srvDesc = new ShaderResourceViewDescription
             {
@@ -248,7 +247,7 @@ float4 main(PSIn i):SV_TARGET{ return tex0.Sample(samp,i.Tex); }";
                 _bridge_window, _texture.NativePointer,
                 (uint)_texture.Description.Width,
                 (uint)_texture.Description.Height,
-                quiltWidth: 4096, quiltHeight: 4096, vx: 10, vy: 10, focus: 0.0f, offset: 1.0f, aspect: 0.75f, zoom: 1, depth_loc: 2);
+                quiltWidth: 4096, quiltHeight: 4096, vx: 10, vy: 10, focus: -0.007f, offset: 1.0f, aspect: 1.77f, zoom: 1, depth_loc: 2);
 
             SwapChain.Present(0, PresentFlags.None);
             FlushCommandQueue();
