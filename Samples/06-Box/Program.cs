@@ -6,7 +6,7 @@ namespace DX12GameProgramming
         {
             using (var app = new BoxApp())
             {
-                app.Initialize();
+                app.Initialize("Bridge SDK Example Box App");
                 app.Run();
             }
         }

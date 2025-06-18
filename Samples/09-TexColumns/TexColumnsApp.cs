@@ -58,7 +58,7 @@ namespace DX12GameProgramming
         private FrameResource CurrFrameResource => _frameResources[_currFrameResourceIndex];
         private AutoResetEvent CurrentFenceEvent => _fenceEvents[_currFrameResourceIndex];
 
-        public override void Initialize()
+        public override void Initialize(string name = "")
         {
             base.Initialize();
 
@@ -144,6 +144,9 @@ namespace DX12GameProgramming
             CommandList.SetGraphicsRootConstantBufferView(2, passCB.GPUVirtualAddress);
 
             DrawRenderItems(CommandList, _ritemLayers[RenderLayer.Opaque]);
+
+            BridgeSDK.Controller.DrawInteropRGBDTextureDX(_bridge_window, ((System.IntPtr)_textures.First().Value.Resource), 2048, 1792, 4096, 4096, 10, 10, 0, 1, 0.75f, 1, 1);
+
 
             // Indicate a state transition on the resource usage.
             CommandList.ResourceBarrierTransition(CurrentBackBuffer, ResourceStates.RenderTarget, ResourceStates.Present);
@@ -307,21 +310,22 @@ namespace DX12GameProgramming
 
         private void LoadTextures()
         {
-            AddTexture("bricksTex", "bricks.dds");
-            AddTexture("stoneTex", "stone.dds");
-            AddTexture("tileTex", "tile.dds");
+            AddTexture("bricksTex");
+            AddTexture("stoneTex");
+            AddTexture("tileTex");
         }
 
-        private void AddTexture(string name, string filename)
+        private void AddTexture(string name)
         {
-            var tex = new Texture
+            Texture tex = new Texture
             {
                 Name = name,
-                Filename = $"Textures\\{filename}"
+                Filename = "C:\\Users\\zinsl\\Downloads\\38060_rgbd.jpg"
             };
-            tex.Resource = TextureUtilities.CreateTextureFromDDS(Device, tex.Filename);
+            tex.Resource = TextureUtilities.CreateTextureFromBitmap(Device, CommandList, tex.Filename);
             _textures[tex.Name] = tex;
         }
+
 
         private void BuildRootSignature()
         {

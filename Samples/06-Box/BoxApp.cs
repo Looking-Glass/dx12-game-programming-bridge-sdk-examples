@@ -1,319 +1,186 @@
+using System;
 using System.Runtime.InteropServices;
 using SharpDX;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D12;
+using SharpDX.D3DCompiler;
 using SharpDX.DXGI;
+using Resource12 = SharpDX.Direct3D12.Resource;
+
+// --- aliases to avoid type clashes ------------------------------------------
+using DxcBytecode = SharpDX.D3DCompiler.ShaderBytecode;
+using D3D12Bytecode = SharpDX.Direct3D12.ShaderBytecode;
+using SRVDim12 = SharpDX.Direct3D12.ShaderResourceViewDimension;
+// -----------------------------------------------------------------------------
 
 namespace DX12GameProgramming
 {
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
-    internal struct Vertex
+    internal struct TexturedVertex
     {
         public Vector3 Pos;
-        public Vector4 Color;
+        public Vector2 Tex;
     }
 
-    [StructLayout(LayoutKind.Sequential, Pack = 4)]
-    internal struct ObjectConstants
+    internal sealed class BoxApp : D3DApp
     {
-        public Matrix WorldViewProj;
-    }
+        private const int DefaultComponentMapping = 0x1688;   // D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING
 
-    internal class BoxApp : D3DApp
-    {
         private RootSignature _rootSignature;
-        private DescriptorHeap _cbvHeap;
+        private DescriptorHeap _srvHeap;
         private DescriptorHeap[] _descriptorHeaps;
 
-        private UploadBuffer<ObjectConstants> _objectCB;
+        private Resource12 _texture;
+        private Resource12 _vertexBuffer;
+        private VertexBufferView _vbView;
 
-        private MeshGeometry _boxGeo;
-
-        private ShaderBytecode _mvsByteCode;
-        private ShaderBytecode _mpsByteCode;
-
+        private D3D12Bytecode _vsByteCode;
+        private D3D12Bytecode _psByteCode;
         private InputLayoutDescription _inputLayout;
-
         private PipelineState _pso;
 
-        private Matrix _proj = Matrix.Identity;
-        private Matrix _view = Matrix.Identity;
+        private IntPtr _bridgeWindow;   // supplied elsewhere by your framework
 
-        private float _theta = 1.5f * MathUtil.Pi;
-        private float _phi = MathUtil.PiOverFour;
-        private float _radius = 5.0f;
+        public BoxApp() => MainWindowCaption = "Textured Quad";
 
-        private Point _lastMousePos;
-
-        public BoxApp()
+        // ---------------------------------------------------------------------
+        // INITIALISATION
+        // ---------------------------------------------------------------------
+        public override void Initialize(string name)
         {
-            MainWindowCaption = "Box";
-        }
+            base.Initialize(name);
 
-        public override void Initialize()
-        {
-            base.Initialize();
-
-            // Reset the command list to prep for initialization commands.
             CommandList.Reset(DirectCmdListAlloc, null);
 
-            BuildDescriptorHeaps();
-            BuildConstantBuffers();
             BuildRootSignature();
             BuildShadersAndInputLayout();
-            BuildBoxGeometry();
+            BuildDescriptorHeap();
+            LoadTextureAndCreateSRV();
+            BuildFullscreenQuad();
             BuildPSO();
 
-            // Execute the initialization commands.
             CommandList.Close();
             CommandQueue.ExecuteCommandList(CommandList);
-
-            // Wait until initialization is complete.
             FlushCommandQueue();
-        }
-
-        protected override void OnResize()
-        {
-            base.OnResize();
-
-            // The window resized, so update the aspect ratio and recompute the projection matrix.
-            _proj = Matrix.PerspectiveFovLH(MathUtil.PiOverFour, AspectRatio, 1.0f, 1000.0f);
-        }
-
-        protected override void Update(GameTimer gt)
-        {
-            // Convert Spherical to Cartesian coordinates.
-            float x = _radius * MathHelper.Sinf(_phi) * MathHelper.Cosf(_theta);
-            float z = _radius * MathHelper.Sinf(_phi) * MathHelper.Sinf(_theta);
-            float y = _radius * MathHelper.Cosf(_phi);
-
-            // Build the view matrix.
-            _view = Matrix.LookAtLH(new Vector3(x, y, z), Vector3.Zero, Vector3.Up);
-
-            // Simply use identity for world matrix for this demo.
-            Matrix world = Matrix.Identity;
-
-            var cb = new ObjectConstants
-            {
-                WorldViewProj = Matrix.Transpose(world * _view * _proj)
-            };
-
-            // Update the constant buffer with the latest worldViewProj matrix.
-            _objectCB.CopyData(0, ref cb);
-        }
-
-        protected override void Draw(GameTimer gt)
-        {
-            // Reuse the memory associated with command recording.
-            // We can only reset when the associated command lists have finished execution on the GPU.
-            DirectCmdListAlloc.Reset();
-
-            // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
-            // Reusing the command list reuses memory.
-            CommandList.Reset(DirectCmdListAlloc, _pso);
-
-            CommandList.SetViewport(Viewport);
-            CommandList.SetScissorRectangles(ScissorRectangle);
-
-            // Indicate a state transition on the resource usage.
-            CommandList.ResourceBarrierTransition(CurrentBackBuffer, ResourceStates.Present, ResourceStates.RenderTarget);
-
-            // Clear the back buffer and depth buffer.
-            CommandList.ClearRenderTargetView(CurrentBackBufferView, Color.LightSteelBlue);
-            CommandList.ClearDepthStencilView(DepthStencilView, ClearFlags.FlagsDepth | ClearFlags.FlagsStencil, 1.0f, 0);
-
-            // Specify the buffers we are going to render to.
-            CommandList.SetRenderTargets(CurrentBackBufferView, DepthStencilView);
-
-            // TODO: API suggestion: rename descriptorHeapsOut to descriptorHeaps;
-            // TODO: Add an overload for a setting a single SetDescriptorHeap?
-            // TODO: Make requiring explicit length optional.
-            CommandList.SetDescriptorHeaps(_descriptorHeaps.Length, _descriptorHeaps);
-
-            CommandList.SetGraphicsRootSignature(_rootSignature);
-
-            CommandList.SetVertexBuffer(0, _boxGeo.VertexBufferView);
-            CommandList.SetIndexBuffer(_boxGeo.IndexBufferView);
-            CommandList.PrimitiveTopology = PrimitiveTopology.TriangleList;
-
-            CommandList.SetGraphicsRootDescriptorTable(0, _cbvHeap.GPUDescriptorHandleForHeapStart);
-
-            CommandList.DrawIndexedInstanced(_boxGeo.IndexCount, 1, 0, 0, 0);
-
-            // Indicate a state transition on the resource usage.
-            CommandList.ResourceBarrierTransition(CurrentBackBuffer, ResourceStates.RenderTarget, ResourceStates.Present);
-
-            // Done recording commands.
-            CommandList.Close();
-
-            // Add the command list to the queue for execution.
-            CommandQueue.ExecuteCommandList(CommandList);
-
-            // Present the buffer to the screen. Presenting will automatically swap the back and front buffers.
-            SwapChain.Present(0, PresentFlags.None);
-
-            // Wait until frame commands are complete. This waiting is inefficient and is
-            // done for simplicity. Later we will show how to organize our rendering code
-            // so we do not have to wait per frame.
-            FlushCommandQueue();
-        }
-
-        protected override void OnMouseDown(MouseButtons button, Point location)
-        {
-            base.OnMouseDown(button, location);
-            _lastMousePos = location;
-        }
-
-        protected override void OnMouseMove(MouseButtons button, Point location)
-        {
-            if ((button & MouseButtons.Left) != 0)
-            {
-                // Make each pixel correspond to a quarter of a degree.
-                float dx = MathUtil.DegreesToRadians(0.25f * (location.X - _lastMousePos.X));
-                float dy = MathUtil.DegreesToRadians(0.25f * (location.Y - _lastMousePos.Y));
-
-                // Update angles based on input to orbit camera around box.
-                _theta += dx;
-                _phi += dy;
-
-                // Restrict the angle mPhi.
-                _phi = MathUtil.Clamp(_phi, 0.1f, MathUtil.Pi - 0.1f);
-            }
-            else if ((button & MouseButtons.Right) != 0)
-            {
-                // Make each pixel correspond to a quarter of a degree.
-                float dx = 0.005f * (location.X - _lastMousePos.X);
-                float dy = 0.005f * (location.Y - _lastMousePos.Y);
-
-                // Update the camera radius based on input.
-                _radius += dx - dy;
-
-                // Restrict the radius.
-                _radius = MathUtil.Clamp(_radius, 3.0f, 15.0f);
-            }
-
-            _lastMousePos = location;
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                _rootSignature?.Dispose();
-                _cbvHeap?.Dispose();
-                _objectCB?.Dispose();
-                _boxGeo?.Dispose();
-                _pso?.Dispose();
-            }
-
-            base.Dispose(disposing);
-        }
-
-        private void BuildDescriptorHeaps()
-        {
-            var cbvHeapDesc = new DescriptorHeapDescription
-            {
-                DescriptorCount = 1,
-                Type = DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
-                Flags = DescriptorHeapFlags.ShaderVisible,
-                NodeMask = 0
-            };
-            _cbvHeap = Device.CreateDescriptorHeap(cbvHeapDesc);
-            _descriptorHeaps = new[] { _cbvHeap };
-        }
-
-        private void BuildConstantBuffers()
-        {
-            int sizeInBytes = D3DUtil.CalcConstantBufferByteSize<ObjectConstants>();
-
-            _objectCB = new UploadBuffer<ObjectConstants>(Device, 1, true);
-
-            var cbvDesc = new ConstantBufferViewDescription
-            {
-                BufferLocation = _objectCB.Resource.GPUVirtualAddress,
-                SizeInBytes = sizeInBytes
-            };
-            CpuDescriptorHandle cbvHeapHandle = _cbvHeap.CPUDescriptorHandleForHeapStart;
-            Device.CreateConstantBufferView(cbvDesc, cbvHeapHandle);
         }
 
         private void BuildRootSignature()
         {
-            // Shader programs typically require resources as input (constant buffers,
-            // textures, samplers). The root signature defines the resources the shader
-            // programs expect. If we think of the shader programs as a function, and
-            // the input resources as function parameters, then the root signature can be
-            // thought of as defining the function signature.
+            // descriptor table: t0 (texture)
+            var range = new DescriptorRange(DescriptorRangeType.ShaderResourceView, 1, 0);
+            var rootParams = new[] { new RootParameter(ShaderVisibility.Pixel, range) };
 
-            // Root parameter can be a table, root descriptor or root constants.
-
-            // Create a single descriptor table of CBVs.
-            var cbvTable = new DescriptorRange(DescriptorRangeType.ConstantBufferView, 1, 0);
-
-            // A root signature is an array of root parameters.
-            var rootSigDesc = new RootSignatureDescription(RootSignatureFlags.AllowInputAssemblerInputLayout, new[]
+            // static sampler that the PS expects at s0
+            var staticSamplers = new[]
             {
-                new RootParameter(ShaderVisibility.Vertex, cbvTable)
-            });
-
-            _rootSignature = Device.CreateRootSignature(rootSigDesc.Serialize());
+        new StaticSamplerDescription
+        {
+            Filter             = Filter.MinMagMipLinear,
+            AddressU           = TextureAddressMode.Clamp,
+            AddressV           = TextureAddressMode.Clamp,
+            AddressW           = TextureAddressMode.Clamp,
+            ShaderRegister     = 0,              // s0
+            RegisterSpace      = 0,
+            ShaderVisibility   = ShaderVisibility.Pixel
         }
+    };
+
+            var desc = new RootSignatureDescription(
+                RootSignatureFlags.AllowInputAssemblerInputLayout,
+                rootParams,
+                staticSamplers);
+
+            _rootSignature = Device.CreateRootSignature(desc.Serialize());
+        }
+
 
         private void BuildShadersAndInputLayout()
         {
-            _mvsByteCode = D3DUtil.CompileShader("Shaders\\Color.hlsl", "VS", "vs_5_0");
-            _mpsByteCode = D3DUtil.CompileShader("Shaders\\Color.hlsl", "PS", "ps_5_0");
+            const string vsSrc = @"
+struct VSIn  { float3 Pos:POSITION; float2 Tex:TEXCOORD; };
+struct VSOut { float4 Pos:SV_POSITION; float2 Tex:TEXCOORD; };
+VSOut main(VSIn v){ VSOut o; o.Pos=float4(v.Pos,1); o.Tex=v.Tex; return o; }";
 
-            _inputLayout = new InputLayoutDescription(new[] // TODO: API suggestion: Add params overload
+            const string psSrc = @"
+Texture2D tex0:register(t0);
+SamplerState samp:register(s0);
+struct PSIn { float4 Pos:SV_POSITION; float2 Tex:TEXCOORD; };
+float4 main(PSIn i):SV_TARGET{ return tex0.Sample(samp,i.Tex); }";
+
+            var vsBlob = DxcBytecode.Compile(vsSrc, "main", "vs_5_0");
+            _vsByteCode = new D3D12Bytecode(vsBlob);
+
+            var psBlob = DxcBytecode.Compile(psSrc, "main", "ps_5_0");
+            _psByteCode = new D3D12Bytecode(psBlob);
+
+            _inputLayout = new InputLayoutDescription(new[]
             {
-                new InputElement("POSITION", 0, Format.R32G32B32_Float, 0, 0),
-                new InputElement("COLOR", 0, Format.R32G32B32A32_Float, 12, 0)
+                new InputElement("POSITION",0,Format.R32G32B32_Float,0,0),
+                new InputElement("TEXCOORD",0,Format.R32G32_Float,   12,0)
             });
         }
 
-        private void BuildBoxGeometry()
+        private void BuildDescriptorHeap()
         {
-            Vertex[] vertices =
+            _srvHeap = Device.CreateDescriptorHeap(new DescriptorHeapDescription
             {
-                new Vertex { Pos = new Vector3(-1.0f, -1.0f, -1.0f), Color = Color.White.ToVector4() },
-                new Vertex { Pos = new Vector3(-1.0f, +1.0f, -1.0f), Color = Color.Black.ToVector4() },
-                new Vertex { Pos = new Vector3(+1.0f, +1.0f, -1.0f), Color = Color.Red.ToVector4() },
-                new Vertex { Pos = new Vector3(+1.0f, -1.0f, -1.0f), Color = Color.Green.ToVector4() },
-                new Vertex { Pos = new Vector3(-1.0f, -1.0f, +1.0f), Color = Color.Blue.ToVector4() },
-                new Vertex { Pos = new Vector3(-1.0f, +1.0f, +1.0f), Color = Color.Yellow.ToVector4() },
-                new Vertex { Pos = new Vector3(+1.0f, +1.0f, +1.0f), Color = Color.Cyan.ToVector4() },
-                new Vertex { Pos = new Vector3(+1.0f, -1.0f, +1.0f), Color = Color.Magenta.ToVector4() }
-            };
+                DescriptorCount = 1,
+                Type = DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
+                Flags = DescriptorHeapFlags.ShaderVisible
+            });
 
-            short[] indices =
-            {
-                // front face
-                0, 1, 2,
-                0, 2, 3,
-
-                // back face
-                4, 6, 5,
-                4, 7, 6,
-
-                // left face
-                4, 5, 1,
-                4, 1, 0,
-
-                // right face
-                3, 2, 6,
-                3, 6, 7,
-
-                // top face
-                1, 5, 6,
-                1, 6, 2,
-
-                // bottom face
-                4, 0, 3,
-                4, 3, 7
-            };
-
-            _boxGeo = MeshGeometry.New(Device, CommandList, vertices, indices);
+            _descriptorHeaps = new[] { _srvHeap };
         }
+
+        private void LoadTextureAndCreateSRV()
+        {
+            _texture = TextureUtilities.CreateTextureFromBitmap(
+                Device, CommandList, @"C:\Users\zinsl\Downloads\38060_rgbd.jpg");
+
+            var srvDesc = new ShaderResourceViewDescription
+            {
+                Shader4ComponentMapping = DefaultComponentMapping,
+                Format = Format.R8G8B8A8_UNorm,
+                Dimension = SRVDim12.Texture2D,
+                Texture2D = { MipLevels = 1 }
+            };
+
+            Device.CreateShaderResourceView(_texture, srvDesc, _srvHeap.CPUDescriptorHandleForHeapStart);
+            BridgeSDK.Controller.RegisterTextureDX(_bridge_window, _texture.NativePointer);
+        }
+
+        private void BuildFullscreenQuad()
+        {
+            var verts = new[]
+            {
+        new TexturedVertex{Pos=new Vector3(-1, 1,0), Tex=new Vector2(0,0)},
+        new TexturedVertex{Pos=new Vector3( 1, 1,0), Tex=new Vector2(1,0)},
+        new TexturedVertex{Pos=new Vector3(-1,-1,0), Tex=new Vector2(0,1)},
+        new TexturedVertex{Pos=new Vector3(-1,-1,0), Tex=new Vector2(0,1)},
+        new TexturedVertex{Pos=new Vector3( 1, 1,0), Tex=new Vector2(1,0)},
+        new TexturedVertex{Pos=new Vector3( 1,-1,0), Tex=new Vector2(1,1)}
+    };
+
+            int vbSize = Utilities.SizeOf<TexturedVertex>() * verts.Length;
+
+            _vertexBuffer = Device.CreateCommittedResource(
+                new HeapProperties(HeapType.Upload),
+                HeapFlags.None,
+                ResourceDescription.Buffer(vbSize),
+                ResourceStates.GenericRead);
+
+            IntPtr dataBegin = _vertexBuffer.Map(0);
+            Utilities.Write(dataBegin, verts, 0, verts.Length);
+            _vertexBuffer.Unmap(0);
+
+            _vbView = new VertexBufferView
+            {
+                BufferLocation = _vertexBuffer.GPUVirtualAddress,
+                StrideInBytes = Utilities.SizeOf<TexturedVertex>(),
+                SizeInBytes = vbSize
+            };
+        }
+
 
         private void BuildPSO()
         {
@@ -321,20 +188,87 @@ namespace DX12GameProgramming
             {
                 InputLayout = _inputLayout,
                 RootSignature = _rootSignature,
-                VertexShader = _mvsByteCode,
-                PixelShader = _mpsByteCode,
+                VertexShader = _vsByteCode,
+                PixelShader = _psByteCode,
                 RasterizerState = RasterizerStateDescription.Default(),
                 BlendState = BlendStateDescription.Default(),
-                DepthStencilState = DepthStencilStateDescription.Default(),
+                DepthStencilState = new DepthStencilStateDescription
+                {
+                    IsDepthEnabled = false,
+                    DepthWriteMask = DepthWriteMask.Zero,
+                    DepthComparison = Comparison.Always
+                },
                 SampleMask = int.MaxValue,
                 PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
                 RenderTargetCount = 1,
-                SampleDescription = new SampleDescription(MsaaCount, MsaaQuality),
-                DepthStencilFormat = DepthStencilFormat
+                SampleDescription = new SampleDescription(MsaaCount, MsaaQuality), // *** match swap-chain MSAA ***
+                DepthStencilFormat = Format.Unknown
             };
             psoDesc.RenderTargetFormats[0] = BackBufferFormat;
 
             _pso = Device.CreateGraphicsPipelineState(psoDesc);
+        }
+
+        // ---------------------------------------------------------------------
+        // PER-FRAME DRAW
+        // ---------------------------------------------------------------------
+        protected override void Draw(GameTimer gt)
+        {
+            DirectCmdListAlloc.Reset();
+            CommandList.Reset(DirectCmdListAlloc, _pso);
+
+
+            CommandList.SetViewport(Viewport);
+            CommandList.SetScissorRectangles(ScissorRectangle);
+
+            CommandList.ResourceBarrierTransition(CurrentBackBuffer,
+                                                  ResourceStates.Present,
+                                                  ResourceStates.RenderTarget);
+
+            CommandList.ClearRenderTargetView(CurrentBackBufferView, Color.Black);
+            CommandList.SetRenderTargets(CurrentBackBufferView, null);
+
+            CommandList.SetDescriptorHeaps(_descriptorHeaps.Length, _descriptorHeaps);
+            CommandList.SetGraphicsRootSignature(_rootSignature);
+            CommandList.SetGraphicsRootDescriptorTable(0, _srvHeap.GPUDescriptorHandleForHeapStart);
+
+            CommandList.PrimitiveTopology = PrimitiveTopology.TriangleList;
+            CommandList.SetVertexBuffers(0, new[] { _vbView });
+            CommandList.DrawInstanced(6, 1, 0, 0);
+
+            CommandList.ResourceBarrierTransition(CurrentBackBuffer,
+                                                  ResourceStates.RenderTarget,
+                                                  ResourceStates.Present);
+            CommandList.Close();
+            CommandQueue.ExecuteCommandList(CommandList);
+            FlushCommandQueue();
+
+
+            BridgeSDK.Controller.DrawInteropRGBDTextureDX(
+                _bridge_window, _texture.NativePointer,
+                (uint)_texture.Description.Width,
+                (uint)_texture.Description.Height,
+                quiltWidth: 4096, quiltHeight: 4096, vx: 10, vy: 10, focus: 0.0f, offset: 1.0f, aspect: 0.75f, zoom: 1, depth_loc: 2);
+
+            SwapChain.Present(0, PresentFlags.None);
+            FlushCommandQueue();
+        }
+
+        // ---------------------------------------------------------------------
+        // CLEAN-UP
+        // ---------------------------------------------------------------------
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _vertexBuffer?.Dispose();
+                _texture?.Dispose();
+                _srvHeap?.Dispose();
+                _pso?.Dispose();
+                _rootSignature?.Dispose();
+                BridgeSDK.Controller.UnregisterTextureDX(_bridge_window, _texture.NativePointer);
+            }
+            base.Dispose(disposing);
         }
     }
 }

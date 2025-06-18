@@ -1,10 +1,13 @@
 using System;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.Linq;
 using System.Runtime.InteropServices;
 using SharpDX.Direct3D12;
 using SharpDX.DXGI;
 using Device = SharpDX.Direct3D12.Device;
 using Resource = SharpDX.Direct3D12.Resource;
+using Resource12 = SharpDX.Direct3D12.Resource;
 
 namespace DX12GameProgramming
 {
@@ -793,41 +796,102 @@ namespace DX12GameProgramming
         /// <param name="device">Device</param>
         /// <param name="filename">Filename</param>
         /// <returns></returns>
-        public static Resource CreateTextureFromBitmap(Device device, string filename)
+        public static Resource12 CreateTextureFromBitmap(
+            SharpDX.Direct3D12.Device device12,
+            SharpDX.Direct3D12.GraphicsCommandList cmdList,
+            string filename)
         {
-            System.Drawing.Bitmap bitmap = new System.Drawing.Bitmap(filename);
-
-            int width = bitmap.Width;
-            int height = bitmap.Height;
-
-            // Describe and create a Texture2D.
-            ResourceDescription textureDesc = new ResourceDescription()
+            // Load the bitmap from file.
+            using (Bitmap bitmap = new Bitmap(filename))
             {
-                MipLevels = 1,
-                Format = Format.B8G8R8A8_UNorm,
-                Width = width,
-                Height = height,
-                Flags = ResourceFlags.None,
-                DepthOrArraySize = 1,
-                SampleDescription = new SampleDescription(1, 0),
-                Dimension = ResourceDimension.Texture2D,
-            };
+                int width = bitmap.Width;
+                int height = bitmap.Height;
+                const int bytesPerPixel = 4;
 
-            var buffer = device.CreateCommittedResource(new HeapProperties(HeapType.Upload), HeapFlags.None, textureDesc, ResourceStates.GenericRead);
+                // Describe a GPU texture in a DEFAULT heap that is shareable.
+                ResourceDescription texDesc = ResourceDescription.Texture2D(
+                    Format.R8G8B8A8_UNorm,
+                    width,
+                    height,
+                    1,      // array size
+                    1       // mip levels
+                );
+                texDesc.Flags |= ResourceFlags.AllowSimultaneousAccess | ResourceFlags.AllowRenderTarget;
 
+                // Create the GPU texture initially in COPY_DEST.
+                Resource12 gpuTexture = device12.CreateCommittedResource(
+                    new HeapProperties(HeapType.Default),
+                    HeapFlags.Shared,
+                    texDesc,
+                    ResourceStates.CopyDestination
+                );
 
-            System.Drawing.Imaging.BitmapData data = bitmap.LockBits(new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                // Get the required footprints for copying.
+                SharpDX.Direct3D12.PlacedSubResourceFootprint[] layouts = new SharpDX.Direct3D12.PlacedSubResourceFootprint[1];
+                int[] numRows = new int[1];
+                long[] rowSizeInBytes = new long[1];
+                device12.GetCopyableFootprints(
+                    ref texDesc,
+                    0,
+                    1,
+                    0,
+                    layouts,
+                    numRows,
+                    rowSizeInBytes,
+                    out long uploadSize
+                );
 
-            buffer.WriteToSubresource(0, new ResourceRegion()
-            {
-                Back = 1,
-                Bottom = height,
-                Right = width
-            }, data.Scan0, 4 * width, 4 * width * height);
-            int bufferSize = data.Height * data.Stride;
-            bitmap.UnlockBits(data);
+                // Create an upload buffer for the bitmap data.
+                Resource12 uploadBuffer = device12.CreateCommittedResource(
+                    new HeapProperties(HeapType.Upload),
+                    HeapFlags.None,
+                    ResourceDescription.Buffer(uploadSize),
+                    ResourceStates.GenericRead
+                );
 
-            return buffer;
+                // Map the upload buffer and copy each scanline.
+                BitmapData bmpData = bitmap.LockBits(
+                    new Rectangle(0, 0, width, height),
+                    ImageLockMode.ReadOnly,
+                    PixelFormat.Format32bppArgb
+                );
+
+                unsafe
+                {
+                    byte* dstStart = (byte*)uploadBuffer.Map(0) + layouts[0].Offset;
+                    byte* srcStart = (byte*)bmpData.Scan0;
+
+                    for (int y = 0; y < height; y++)
+                    {
+                        Buffer.MemoryCopy(
+                            srcStart + y * bmpData.Stride,
+                            dstStart + y * layouts[0].Footprint.RowPitch,
+                            width * bytesPerPixel,
+                            width * bytesPerPixel
+                        );
+                    }
+                    uploadBuffer.Unmap(0);
+                }
+
+                bitmap.UnlockBits(bmpData);
+
+                // Copy from the upload buffer into the GPU texture.
+                TextureCopyLocation srcLoc = new TextureCopyLocation(uploadBuffer, layouts[0]);
+                TextureCopyLocation dstLoc = new TextureCopyLocation(gpuTexture, 0);
+                cmdList.CopyTextureRegion(dstLoc, 0, 0, 0, srcLoc, null);
+
+                // Transition the texture from COPY_DEST → COMMON.
+                ResourceBarrier barrier = new ResourceBarrier(
+                    new ResourceTransitionBarrier(
+                        gpuTexture,
+                        ResourceStates.CopyDestination,
+                        ResourceStates.Common
+                    )
+                );
+                cmdList.ResourceBarrier(barrier);
+
+                return gpuTexture;
+            }
         }
     }
 }

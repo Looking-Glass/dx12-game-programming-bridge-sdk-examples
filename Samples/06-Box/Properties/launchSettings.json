@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "06-Box": {
+      "commandName": "Project",
+      "nativeDebugging": true
+    }
+  }
+}

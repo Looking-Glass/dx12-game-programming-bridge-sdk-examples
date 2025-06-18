@@ -105,13 +105,278 @@ namespace DX12GameProgramming
             => RtvHeap.CPUDescriptorHandleForHeapStart + SwapChain.CurrentBackBufferIndex * RtvDescriptorSize;
         protected CpuDescriptorHandle DepthStencilView => DsvHeap.CPUDescriptorHandleForHeapStart;
 
-        public virtual void Initialize()
+        protected bool _lkg_display = false;
+        protected BridgeSDK.Window _bridge_window;
+        protected long _bridge_window_x = 0;
+        protected long _bridge_window_y = 0;
+        protected uint _bridge_window_width = 0;
+        protected uint _bridge_window_height = 0;
+        protected uint _bridge_max_texture_size = 0;
+        protected uint _bridge_render_texture_width = 0;
+        protected uint _bridge_render_texture_height = 0;
+        protected uint _bridge_quilt_vx = 5;
+        protected uint _bridge_quilt_vy = 9;
+        protected uint _bridge_quilt_view_width = 0;
+        protected uint _bridge_quilt_view_height = 0;
+        protected Resource _quiltRenderTarget;
+        protected Resource _quiltDepthStencilBuffer;
+        protected DescriptorHeap _quiltRtvHeap;
+        protected DescriptorHeap _quiltDsvHeap;
+        protected DescriptorHeap _srvHeap;
+        protected DescriptorHeap _samplerHeap;
+        protected Resource _stagingResource;
+        protected Resource _bridge_offscreen_texture;
+
+        private void InitializeBridge(string name)
         {
+            //if (!BridgeSDK.Controller.Initialize(name))
+            //{
+            //    throw new Exception("Failed to initialize bridge");
+            //}
+
+            if (!BridgeSDK.Controller.InitializeWithPath(name, "C:\\Repos\\LookingGlassBridge\\out\\build\\x64-Debug"))
+            {
+                throw new Exception("Failed to initialize bridge");
+            }
+
+            // mlc: instance the window
+            bool window_status = BridgeSDK.Controller.InstanceWindowDX(Device.NativePointer, ref _bridge_window);
+
+            if (window_status)
+            {
+                // mlc: cache the size of the bridge output so we can decide how large to make
+                // the quilt views
+                BridgeSDK.Controller.GetWindowDimensions(_bridge_window, ref _bridge_window_width, ref _bridge_window_height);
+                BridgeSDK.Controller.GetWindowPosition(_bridge_window, ref _bridge_window_x, ref _bridge_window_y);
+
+                // mlc: see how large we can make out render texture
+                BridgeSDK.Controller.GetMaxTextureSize(_bridge_window, ref _bridge_max_texture_size);
+
+                // mlc: dx12 puts an artifical cap on this on some cards:
+                if (_bridge_max_texture_size > 16384)
+                    _bridge_max_texture_size = 16384;
+
+                // mlc: now we need to figure out how large our views and quilt will be
+                uint desired_view_width = _bridge_window_width;
+                uint desired_view_height = _bridge_window_height;
+
+                uint desired_render_texture_width = desired_view_width * _bridge_quilt_vx;
+                uint desired_render_texture_height = desired_view_height * _bridge_quilt_vy;
+
+                if (desired_render_texture_width <= _bridge_max_texture_size &&
+                    desired_render_texture_height <= _bridge_max_texture_size)
+                {
+                    // mlc: under the max size -- good to go!
+                    _bridge_quilt_view_width = desired_view_width;
+                    _bridge_quilt_view_height = desired_view_height;
+                    _bridge_render_texture_width = desired_render_texture_width;
+                    _bridge_render_texture_height = desired_render_texture_height;
+                }
+                else
+                {
+                    // mlc: the desired sizes are larger than we can support, find the dominant
+                    // and scale down to fit.
+                    float scalar = 0.0f;
+
+                    if (desired_render_texture_width > desired_render_texture_height)
+                    {
+                        scalar = (float)_bridge_max_texture_size / (float)desired_render_texture_width;
+                    }
+                    else
+                    {
+                        scalar = (float)_bridge_max_texture_size / (float)desired_render_texture_height;
+                    }
+
+                    _bridge_quilt_view_width = (uint)((float)desired_view_width * scalar);
+                    _bridge_quilt_view_height = (uint)((float)desired_view_height * scalar);
+                    _bridge_render_texture_width = (uint)((float)desired_render_texture_width * scalar);
+                    _bridge_render_texture_height = (uint)((float)desired_render_texture_height * scalar);
+                }
+
+                // mlc: create descriptor heap for offscreen
+                var srvHeapDesc = new DescriptorHeapDescription
+                {
+                    DescriptorCount = 1,
+                    Type = DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
+                    Flags = DescriptorHeapFlags.ShaderVisible
+                };
+
+                _srvHeap = Device.CreateDescriptorHeap(srvHeapDesc);
+
+
+                // mlc: create descriptor heap for quilt RTV
+                var rtvHeapDesc = new DescriptorHeapDescription
+                {
+                    DescriptorCount = 1,
+                    Type = DescriptorHeapType.RenderTargetView,
+                    Flags = DescriptorHeapFlags.None
+                };
+                _quiltRtvHeap = Device.CreateDescriptorHeap(rtvHeapDesc);
+
+                // mlc: create descriptor heap for quilt DSV
+                var dsvHeapDesc = new DescriptorHeapDescription
+                {
+                    DescriptorCount = 1,
+                    Type = DescriptorHeapType.DepthStencilView,
+                    Flags = DescriptorHeapFlags.None
+                };
+
+                _quiltDsvHeap = Device.CreateDescriptorHeap(dsvHeapDesc);
+
+                // mlc: describe the render target
+                var rtDesc = new ResourceDescription
+                {
+                    Dimension = ResourceDimension.Texture2D,
+                    Alignment = 0,
+                    Width = _bridge_render_texture_width,
+                    Height = (int)_bridge_render_texture_height,
+                    DepthOrArraySize = 1,
+                    MipLevels = 1,
+                    Format = BackBufferFormat,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Layout = TextureLayout.Unknown,
+                    Flags = ResourceFlags.AllowRenderTarget | ResourceFlags.AllowSimultaneousAccess
+                };
+
+                // mlc: specify the clear color for the render target
+                var clearColor = new ClearValue
+                {
+                    Format = BackBufferFormat,
+                    Color = new SharpDX.Mathematics.Interop.RawVector4(0.0f, 0.0f, 0.0f, 1.0f) // Clear to black
+                };
+
+                // mlc: create the Render Target
+                _quiltRenderTarget = Device.CreateCommittedResource(
+                    new HeapProperties(HeapType.Default),
+                    HeapFlags.Shared,
+                    rtDesc,
+                    ResourceStates.RenderTarget,
+                    clearColor);
+
+                // mlc: describe the Depth/Stencil Buffer
+                var dsDesc = new ResourceDescription
+                {
+                    Dimension = ResourceDimension.Texture2D,
+                    Alignment = 0,
+                    Width = _bridge_render_texture_width,
+                    Height = (int)_bridge_render_texture_height,
+                    DepthOrArraySize = 1,
+                    MipLevels = 1,
+                    Format = Format.D24_UNorm_S8_UInt, // Common depth format
+                    SampleDescription = new SampleDescription(1, 0),
+                    Layout = TextureLayout.Unknown,
+                    Flags = ResourceFlags.AllowDepthStencil
+                };
+
+                // mlc: specify the clear value for the depth stencil buffer
+                var depthClearValue = new ClearValue
+                {
+                    Format = Format.D24_UNorm_S8_UInt,
+                    DepthStencil = new DepthStencilValue
+                    {
+                        Depth = 1.0f,
+                        Stencil = 0
+                    }
+                };
+
+                // mlc: create the Depth/Stencil Buffer
+                _quiltDepthStencilBuffer = Device.CreateCommittedResource(
+                    new HeapProperties(HeapType.Default),
+                    HeapFlags.None,
+                    dsDesc,
+                    ResourceStates.DepthWrite,
+                    depthClearValue);
+
+                // mlc: create the RTV for the quilt render target
+                var rtvHandle = _quiltRtvHeap.CPUDescriptorHandleForHeapStart;
+                Device.CreateRenderTargetView(_quiltRenderTarget, null, rtvHandle);
+
+                // mlc: create the DSV for the quilt depth stencil buffer
+                var dsvHandle = _quiltDsvHeap.CPUDescriptorHandleForHeapStart;
+                Device.CreateDepthStencilView(_quiltDepthStencilBuffer, null, dsvHandle);
+
+                // mlc: create a readback resource to preview the render target
+                var stagingDesc = ResourceDescription.Buffer(new ResourceAllocationInformation()
+                {
+                    SizeInBytes = _bridge_render_texture_width * _bridge_render_texture_height * 4,
+                    Alignment = 0
+                });
+
+                _stagingResource = Device.CreateCommittedResource(
+                        new HeapProperties(HeapType.Readback),
+                        HeapFlags.None,
+                        stagingDesc,
+                        ResourceStates.CopyDestination);
+
+                ClientWidth = (int)_bridge_window_width;
+                ClientHeight = (int)_bridge_window_height;
+
+                BridgeSDK.Controller.RegisterTextureDX(_bridge_window, _quiltRenderTarget.NativePointer);
+
+                _lkg_display = true;
+
+                SetWindowProperties();
+            }
+            else
+            {
+                throw new Exception("Failed to create bridge window");
+            }
+        }
+
+        protected void SetWindowProperties()
+        {
+            // Remove the title bar and borders (set as popup)
+            var hWnd = Process.GetCurrentProcess().MainWindowHandle;
+            uint style = NativeMethods.GetWindowLong(hWnd, NativeMethods.GWL_STYLE);
+            style &= ~NativeMethods.WS_OVERLAPPEDWINDOW;  // Remove standard window styles
+            style |= NativeMethods.WS_POPUP;              // Set to popup (borderless)
+            NativeMethods.SetWindowLong(hWnd, NativeMethods.GWL_STYLE, style);
+
+            // Position the window at _bridge_window_x, _bridge_window_y and set the size
+            NativeMethods.SetWindowPos(
+                hWnd,
+                IntPtr.Zero,  // No special window ordering
+                (int)_bridge_window_x,
+                (int)_bridge_window_y,
+                (int)_bridge_window_width,
+                (int)_bridge_window_height,
+                NativeMethods.SWP_NOZORDER | NativeMethods.SWP_FRAMECHANGED
+            );
+
+            // Trigger OnResize to update the projection matrix
+            OnResize();
+        }
+
+
+        public virtual void Initialize(string name = "Bridge SDK DX12 Example")
+        {
+#if DEBUG
+            //----------------------------------------
+            // 1.  Turn on the D3D-12 debug layer.
+            //----------------------------------------
+            SharpDX.Direct3D12.DebugInterface.Get().EnableDebugLayer();
+#endif
+
             InitMainWindow();
             InitDirect3D();
 
+#if DEBUG
+            //----------------------------------------
+            // 4.  After you create the Device, hook
+            //     the D3D12 info-queue as well.
+            //----------------------------------------
+            SharpDX.Direct3D12.InfoQueue d3dQueue = Device.QueryInterface<SharpDX.Direct3D12.InfoQueue>();
+            d3dQueue.SetBreakOnSeverity(SharpDX.Direct3D12.MessageSeverity.Corruption, true);
+            d3dQueue.SetBreakOnSeverity(SharpDX.Direct3D12.MessageSeverity.Error, true);
+            d3dQueue.MessageCountLimit = long.MaxValue;     // send all messages to Output
+#endif
+
+
+
             // Do the initial resize code.
             OnResize();
+
+            InitializeBridge(name);
 
             _running = true;
         }
@@ -123,16 +388,16 @@ namespace DX12GameProgramming
             {
                 Application.DoEvents();
                 Timer.Tick();
-                if (!_appPaused)
-                {
-                    CalculateFrameRateStats();
-                    Update(Timer);
-                    Draw(Timer);
-                }
-                else
-                {
-                    Thread.Sleep(100);
-                }
+                //if (!_appPaused)
+                //{
+                CalculateFrameRateStats();
+                Update(Timer);
+                Draw(Timer);
+                //}
+                //else
+                //{
+                //    Thread.Sleep(100);
+                //}
             }
         }
 
