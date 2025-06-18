@@ -31,6 +31,7 @@ namespace DX12GameProgramming
         private DescriptorHeap[] _descriptorHeaps;
 
         private Resource12 _texture;
+        private Resource12 _textureUpload;
         private Resource12 _vertexBuffer;
         private VertexBufferView _vbView;
 
@@ -61,6 +62,10 @@ namespace DX12GameProgramming
             CommandList.Close();
             CommandQueue.ExecuteCommandList(CommandList);
             FlushCommandQueue();
+
+            // GPU finished using the upload heap → safe to free
+            _textureUpload?.Dispose();
+            _textureUpload = null;
         }
 
         private void BuildRootSignature()
@@ -133,20 +138,24 @@ float4 main(PSIn i):SV_TARGET{ return tex0.Sample(samp,i.Tex); }";
 
         private void LoadTextureAndCreateSRV()
         {
-            _texture = TextureUtilities.CreateTextureFromBitmap(
-                Device, CommandList, @"./assets/188445_rgbd.jpg");
+            _texture = TextureUtilities.CreateTextureR10G10B10A2(
+                Device,
+                CommandList,
+                "./assets/188445_rgbd.jpg",
+                out _textureUpload);
 
-            var srvDesc = new ShaderResourceViewDescription
+            ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
             {
                 Shader4ComponentMapping = DefaultComponentMapping,
-                Format = Format.R8G8B8A8_UNorm,
+                Format = Format.R10G10B10A2_UNorm,
                 Dimension = SRVDim12.Texture2D,
                 Texture2D = { MipLevels = 1 }
             };
-
             Device.CreateShaderResourceView(_texture, srvDesc, _srvHeap.CPUDescriptorHandleForHeapStart);
             BridgeSDK.Controller.RegisterTextureDX(_bridge_window, _texture.NativePointer);
         }
+
+
 
         private void BuildFullscreenQuad()
         {
@@ -261,6 +270,7 @@ float4 main(PSIn i):SV_TARGET{ return tex0.Sample(samp,i.Tex); }";
             if (disposing)
             {
                 _vertexBuffer?.Dispose();
+                _textureUpload?.Dispose();
                 _texture?.Dispose();
                 _srvHeap?.Dispose();
                 _pso?.Dispose();

@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using SharpDX.Direct3D12;
 using SharpDX.DXGI;
 using Device = SharpDX.Direct3D12.Device;
@@ -893,5 +894,96 @@ namespace DX12GameProgramming
                 return gpuTexture;
             }
         }
+
+        public static Resource12 CreateTextureR10G10B10A2(
+            SharpDX.Direct3D12.Device device12,
+            GraphicsCommandList cmdList,
+            string filename,
+            out Resource12 uploadBuffer)
+        {
+            using (Bitmap bmp = new Bitmap(filename))
+            {
+                int width = bmp.Width;
+                int height = bmp.Height;
+
+                ResourceDescription texDesc = ResourceDescription.Texture2D(
+                    Format.R10G10B10A2_UNorm,
+                    width,
+                    height,
+                    1, 1);
+                texDesc.Flags |= ResourceFlags.AllowSimultaneousAccess | ResourceFlags.AllowRenderTarget;
+
+                Resource12 gpuTex = device12.CreateCommittedResource(
+                    new HeapProperties(HeapType.Default),
+                    HeapFlags.Shared,
+                    texDesc,
+                    ResourceStates.CopyDestination);
+
+                PlacedSubResourceFootprint[] layouts = new PlacedSubResourceFootprint[1];
+                int[] rows = new int[1];
+                long[] rowSize = new long[1];
+                device12.GetCopyableFootprints(ref texDesc, 0, 1, 0, layouts, rows, rowSize, out long uploadSize);
+
+                uploadBuffer = device12.CreateCommittedResource(
+                    new HeapProperties(HeapType.Upload),
+                    HeapFlags.None,
+                    ResourceDescription.Buffer(uploadSize),
+                    ResourceStates.GenericRead);
+
+                BitmapData lockBits = bmp.LockBits(
+                    new Rectangle(0, 0, width, height),
+                    ImageLockMode.ReadOnly,
+                    PixelFormat.Format32bppArgb);
+
+                unsafe
+                {
+                    byte* dstBase = (byte*)uploadBuffer.Map(0) + layouts[0].Offset;
+                    byte* srcBase = (byte*)lockBits.Scan0;
+                    int dstPitch = layouts[0].Footprint.RowPitch;
+
+                    int coreCount = Environment.ProcessorCount;
+                    ParallelOptions opts = new ParallelOptions { MaxDegreeOfParallelism = coreCount };
+
+                    Parallel.For(0, coreCount, opts, core =>
+                    {
+                        int startRow = core * height / coreCount;
+                        int endRow = (core + 1 == coreCount) ? height : (core + 1) * height / coreCount;
+
+                        for (int y = startRow; y < endRow; y++)
+                        {
+                            uint* dstRow = (uint*)(dstBase + y * dstPitch);
+                            byte* srcRow = srcBase + y * lockBits.Stride;
+
+                            for (int x = 0; x < width; x++)
+                            {
+                                byte b8 = srcRow[x * 4 + 0];
+                                byte g8 = srcRow[x * 4 + 1];
+                                byte r8 = srcRow[x * 4 + 2];
+                                byte a8 = srcRow[x * 4 + 3];
+
+                                uint r10 = (uint)((r8 * 1023 + 127) / 255);
+                                uint g10 = (uint)((g8 * 1023 + 127) / 255);
+                                uint b10 = (uint)((b8 * 1023 + 127) / 255);
+                                uint a2 = (uint)(a8 >> 6);
+
+                                dstRow[x] = r10 | (g10 << 10) | (b10 << 20) | (a2 << 30);
+                            }
+                        }
+                    });
+
+                    uploadBuffer.Unmap(0);
+                }
+                bmp.UnlockBits(lockBits);
+
+                TextureCopyLocation srcLoc = new TextureCopyLocation(uploadBuffer, layouts[0]);
+                TextureCopyLocation dstLoc = new TextureCopyLocation(gpuTex, 0);
+                cmdList.CopyTextureRegion(dstLoc, 0, 0, 0, srcLoc, null);
+                cmdList.ResourceBarrier(new ResourceBarrier(
+                    new ResourceTransitionBarrier(gpuTex, ResourceStates.CopyDestination, ResourceStates.Common)));
+
+                return gpuTex;   // caller disposes uploadBuffer after GPU flush
+            }
+        }
+
     }
 }
